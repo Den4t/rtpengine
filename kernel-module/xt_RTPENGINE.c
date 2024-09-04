@@ -3802,7 +3802,7 @@ static int target_find_ssrc(struct rtpengine_target *g, uint32_t ssrc) {
 	int ssrc_idx;
 
 	if (unlikely(!g->target.ssrc[0]))
-		return -1;
+		return -2;
 
 	for (ssrc_idx = 0; ssrc_idx < RTPE_NUM_SSRC_TRACKING; ssrc_idx++) {
 		if (!g->target.ssrc[ssrc_idx])
