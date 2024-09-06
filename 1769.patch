@@ -1,0 +1,211 @@
+From 929fe8d560d06baf426810551aefd63e0dd310db Mon Sep 17 00:00:00 2001
+From: Dennis Yurasov <dennis-y@yandex-team.ru>
+Date: Tue, 5 Dec 2023 14:42:34 +0300
+Subject: [PATCH 1/3] Avoiding "Too many packets in UDP receive queue (more
+ than 50), aborting loop. Dropped packets possible" errors.
+
+---
+ daemon/cli.c          | 12 ++++++++----
+ daemon/main.c         |  7 +++++++
+ daemon/media_socket.c |  6 ++----
+ include/main.h        |  5 +++++
+ 4 files changed, 22 insertions(+), 8 deletions(-)
+
+diff --git a/daemon/cli.c b/daemon/cli.c
+index 7ec8d3284a..0c7bdaac59 100644
+--- a/daemon/cli.c
++++ b/daemon/cli.c
+@@ -302,7 +302,8 @@ static void cli_incoming_params_start(str *instr, struct cli_writer *cw) {
+ 			"redis_allowed_errors = %d\nredis_disable_time = %d\nredis_cmd_timeout = %d\nredis_connect_timeout = %d\n"
+ 			"max-cpu = %.1f\n"
+ 			"max-load = %.2f\n"
+-			"max-bandwidth = %" PRIu64 "\n",
++			"max-bandwidth = %" PRIu64 "\n"
++			"max-recv-iters = %d\n",
+ 			initial_rtpe_config.kernel_table, initial_rtpe_config.max_sessions,
+ 			initial_rtpe_config.timeout, initial_rtpe_config.silent_timeout, initial_rtpe_config.final_timeout,
+ 			initial_rtpe_config.offer_timeout, initial_rtpe_config.delete_delay,
+@@ -316,7 +317,8 @@ static void cli_incoming_params_start(str *instr, struct cli_writer *cw) {
+ 			initial_rtpe_config.redis_disable_time, initial_rtpe_config.redis_cmd_timeout, initial_rtpe_config.redis_connect_timeout,
+ 			(double) initial_rtpe_config.cpu_limit / 100,
+ 			(double) initial_rtpe_config.load_limit / 100,
+-			initial_rtpe_config.bw_limit);
++			initial_rtpe_config.bw_limit,
++			initial_rtpe_config.max_recv_iters);
+ 
+ 	for(s = initial_rtpe_config.interfaces.head; s ; s = s->next) {
+ 		ifa = s->data;
+@@ -357,7 +359,8 @@ static void cli_incoming_params_current(str *instr, struct cli_writer *cw) {
+ 			"redis_allowed_errors = %d\nredis_disable_time = %d\nredis_cmd_timeout = %d\nredis_connect_timeout = %d\n"
+ 			"max-cpu = %.1f\n"
+ 			"max-load = %.2f\n"
+-			"max-bw = %" PRIu64 "\n",
++			"max-bw = %" PRIu64 "\n"
++			"max-recv-iters = %d\n",
+ 			rtpe_config.kernel_table, rtpe_config.max_sessions, rtpe_config.timeout,
+ 			rtpe_config.silent_timeout, rtpe_config.final_timeout, rtpe_config.offer_timeout,
+ 			rtpe_config.delete_delay, rtpe_config.redis_expires_secs, rtpe_config.default_tos,
+@@ -368,7 +371,8 @@ static void cli_incoming_params_current(str *instr, struct cli_writer *cw) {
+ 			rtpe_config.redis_disable_time, rtpe_config.redis_cmd_timeout, rtpe_config.redis_connect_timeout,
+ 			(double) rtpe_config.cpu_limit / 100,
+ 			(double) rtpe_config.load_limit / 100,
+-			rtpe_config.bw_limit);
++			rtpe_config.bw_limit,
++			rtpe_config.max_recv_iters);
+ 
+ 	for(c = rtpe_config.interfaces.head; c ; c = c->next) {
+ 		ifa = c->data;
+diff --git a/daemon/main.c b/daemon/main.c
+index 8b8b65c4a2..5a07156e7b 100644
+--- a/daemon/main.c
++++ b/daemon/main.c
+@@ -106,6 +106,7 @@ struct rtpengine_config rtpe_config = {
+ 			[log_level_index_internals] = -1,
+ 		},
+ 	},
++	.max_recv_iters = MAX_RECV_ITERS,
+ };
+ 
+ static void sighandler(gpointer x) {
+@@ -644,6 +645,7 @@ static void options(int *argc, char ***argv) {
+ 		{ "socket-cpu-affinity",0,0,G_OPTION_ARG_INT,	&rtpe_config.cpu_affinity,"CPU affinity for media sockets","INT"},
+ #endif
+ 		{ "janus-secret", 0,0,	G_OPTION_ARG_STRING,	&rtpe_config.janus_secret,"Admin secret for Janus protocol","STRING"},
++		{ "max-recv-iters", 0, 0, G_OPTION_ARG_INT,    &rtpe_config.max_recv_iters,  "Maximun continuous reading cycles in UDP poller loop.", "INT"},
+ 
+ 		{ NULL, }
+ 	};
+@@ -789,6 +791,9 @@ static void options(int *argc, char ***argv) {
+ 	if (rtpe_config.control_tos < 0 || rtpe_config.control_tos > 255)
+ 		die("Invalid control-ng TOS value");
+ 
++	if (rtpe_config.max_recv_iters < MAX_RECV_ITERS || rtpe_config.control_tos > MAX_RECV_ITERS*10)
++		die("Invalid max_recv_iters value");
++
+ 	if (rtpe_config.timeout <= 0)
+ 		rtpe_config.timeout = 60;
+ 
+@@ -1086,6 +1091,8 @@ static void fill_initial_rtpe_cfg(struct rtpengine_config* ini_rtpe_cfg) {
+ 	ini_rtpe_cfg->jb_length = rtpe_config.jb_length;
+ 	ini_rtpe_cfg->jb_clock_drift = rtpe_config.jb_clock_drift;
+ 
++	ini_rtpe_cfg->max_recv_iters = rtpe_config.max_recv_iters;
++
+ 	rwlock_unlock_w(&rtpe_config.config_lock);
+ }
+ 
+diff --git a/daemon/media_socket.c b/daemon/media_socket.c
+index 003217142e..a11d2da6e0 100644
+--- a/daemon/media_socket.c
++++ b/daemon/media_socket.c
+@@ -37,9 +37,6 @@
+ #define PORT_RANDOM_MAX 20
+ #endif
+ 
+-#ifndef MAX_RECV_ITERS
+-#define MAX_RECV_ITERS 50
+-#endif
+ 
+ #ifndef MAX_RECV_LOOP_STRIKES
+ #define MAX_RECV_LOOP_STRIKES 5
+@@ -3139,11 +3136,11 @@ static void stream_fd_readable(int fd, void *p, uintptr_t u) {
+ 
+ 	for (iters = 0; ; iters++) {
+ #if MAX_RECV_ITERS
+-		if (iters >= MAX_RECV_ITERS) {
++		if (iters >= rtpe_config.max_recv_iters) {
+ 			ilog(LOG_ERROR | LOG_FLAG_LIMIT, "Too many packets in UDP receive queue (more than %d), "
+ 					"aborting loop. Dropped packets possible", iters);
+ 			g_atomic_int_inc(&sfd->error_strikes);
+ 			g_atomic_int_set(&sfd->active_read_events,0);
+ 			goto strike;
+ 		}
+ #endif
+diff --git a/include/main.h b/include/main.h
+index 316d3cf869..5a57ac4203 100644
+--- a/include/main.h
++++ b/include/main.h
+@@ -27,6 +27,10 @@ enum endpoint_learning {
+ 	__EL_LAST
+ };
+ 
++#ifndef MAX_RECV_ITERS
++#define MAX_RECV_ITERS 50
++#endif
++
+ struct rtpengine_config {
+ 	/* everything below protected by config_lock */
+ 	rwlock_t		config_lock;
+@@ -181,6 +185,7 @@ struct rtpengine_config {
+ 	gboolean		measure_rtp;
+ 	int			cpu_affinity;
+ 	char			*janus_secret;
++	int			max_recv_iters;
+ };
+ 
+ 
+
+From c10e36f7e83cbcbcae861c613d59767ef6bf3571 Mon Sep 17 00:00:00 2001
+From: Dennis Yurasov <dennis-y@yandex-team.ru>
+Date: Tue, 5 Dec 2023 15:07:23 +0300
+Subject: [PATCH 2/3] Avoiding "Too many packets in UDP receive queue (more
+ than 50), aborting loop. Dropped packets possible" errors.
+
+---
+ daemon/main.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/daemon/main.c b/daemon/main.c
+index 5a07156e7b..6cd016de30 100644
+--- a/daemon/main.c
++++ b/daemon/main.c
+@@ -792,7 +792,7 @@ static void options(int *argc, char ***argv) {
+ 		die("Invalid control-ng TOS value");
+ 
+ 	if (rtpe_config.max_recv_iters < MAX_RECV_ITERS || rtpe_config.control_tos > MAX_RECV_ITERS*10)
+-		die("Invalid max_recv_iters value");
++		die("Invalid max-recv-iters value");
+ 
+ 	if (rtpe_config.timeout <= 0)
+ 		rtpe_config.timeout = 60;
+
+From 58c7ca2459269c0985e1c8e951723cf83e7b1a9d Mon Sep 17 00:00:00 2001
+From: Dennis Yurasov <dennis-y@yandex-team.ru>
+Date: Tue, 5 Dec 2023 17:12:43 +0300
+Subject: [PATCH 3/3] Avoiding "Too many packets in UDP receive queue (more
+ than 50), aborting loop. Dropped packets possible" errors.
+
+---
+ daemon/main.c     | 2 +-
+ docs/rtpengine.md | 5 +++++
+ 2 files changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/daemon/main.c b/daemon/main.c
+index 6cd016de30..b72b28b730 100644
+--- a/daemon/main.c
++++ b/daemon/main.c
+@@ -791,7 +791,7 @@ static void options(int *argc, char ***argv) {
+ 	if (rtpe_config.control_tos < 0 || rtpe_config.control_tos > 255)
+ 		die("Invalid control-ng TOS value");
+ 
+-	if (rtpe_config.max_recv_iters < MAX_RECV_ITERS || rtpe_config.control_tos > MAX_RECV_ITERS*10)
++	if (rtpe_config.max_recv_iters < 1)
+ 		die("Invalid max-recv-iters value");
+ 
+ 	if (rtpe_config.timeout <= 0)
+diff --git a/docs/rtpengine.md b/docs/rtpengine.md
+index fab4579f7e..6c5c06879c 100644
+--- a/docs/rtpengine.md
++++ b/docs/rtpengine.md
+@@ -641,6 +641,11 @@ call to inject-DTMF won't be sent to __\-\-dtmf-log-dest=__ or __\-\-listen-tcp-
+     Bandwidth usage is sampled in 1-second intervals and is based on
+     received packets, not sent packets.
+ 
++- __\-\-max-recv-iters=__*INT*
++
++    This parameter sets maximum continuous reading cycles in UDP poller loop,
++    can help to avoid dropped packets errors on burstly streams (default 50).
++
+ - __\-\-homer=__*IP46*:*PORT*
+ 
+     Enables sending the decoded contents of RTCP packets to a Homer SIP
