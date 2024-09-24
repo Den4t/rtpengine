@@ -2118,6 +2118,7 @@ static const char *__stream_ssrc_out(struct packet_stream *out_srtp, uint32_t ss
 // 1 = same as 0, but stream can be kernelized
 static int media_demux_protocols(struct packet_handler_ctx *phc) {
 	if (MEDIA_ISSET(phc->mp.media, DTLS) && is_dtls(&phc->s)) {
+		bool fingerprint_verified;
 		// verify DTLS packet against ICE checks if present
 		if (MEDIA_ISSET(phc->mp.media, ICE) && phc->mp.media->ice_agent) {
 			if (!ice_peer_address_known(phc->mp.media->ice_agent, &phc->mp.fsin, phc->mp.stream,
@@ -2132,7 +2133,13 @@ static int media_demux_protocols(struct packet_handler_ctx *phc) {
 		}
 
 		mutex_lock(&phc->mp.stream->in_lock);
+		fingerprint_verified=PS_ISSET(phc->mp.sfd->stream, FINGERPRINT_VERIFIED) ? true: false;
 		int ret = dtls(phc->mp.sfd, &phc->s, &phc->mp.fsin);
+		if (!ret && PS_ISSET(phc->mp.sfd->stream, FINGERPRINT_VERIFIED) && !fingerprint_verified) {
+                        ilogs(crypto, LOG_INFO, "DTLS fingerprint verified");
+                        phc->update = true;
+                        phc->unkernelize_subscriptions = true;
+                }
 		mutex_unlock(&phc->mp.stream->in_lock);
 		if (!ret)
 			return 0;
