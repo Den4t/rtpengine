@@ -683,7 +683,10 @@ static struct call_media *__get_media(struct call_monologue *ml, const struct st
 		// string is used to determine which media section to operate on.
 		med = g_hash_table_lookup(ml->media_ids, &sp->media_id);
 		if (med)
-			return med;
+			if(med->index == sp->index)
+				return med;
+                        else 
+				ilog(LOG_INFO, "stream index #%u not equal media index #%u: re-INVITE change mid ?", sp->index, med->index);
 		if (flags->trickle_ice)
 			ilogs(ice, LOG_ERR, "Received trickle ICE SDP fragment with unknown media ID '"
 					STR_FORMAT "'",
