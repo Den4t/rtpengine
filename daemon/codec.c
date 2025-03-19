@@ -433,8 +433,10 @@ static void __convert_passthrough_ssrc(struct codec_handler *handler) {
 
 static void __reset_sequencer(void *p, void *dummy) {
 	struct ssrc_entry_call *s = p;
-	if (s->sequencers)
+	if (s->sequencers) {
+		ilogs(codec, LOG_DEBUG, "__reset_sequencer resetting sequencers hash: %p", s->sequencers);
 		g_hash_table_destroy(s->sequencers);
+	}
 	s->sequencers = NULL;
 }
 static bool __make_transcoder_full(struct codec_handler *handler, rtp_payload_type *dest,
@@ -448,20 +450,34 @@ static bool __make_transcoder_full(struct codec_handler *handler, rtp_payload_ty
 		return false;
 
 	// don't reset handler if it already matches what we want
-	if (!handler->transcoder)
+	if (!handler->transcoder) {
+		ilogs(codec, LOG_DEBUG, ">> Reset case 1");
 		goto reset;
-	if (!rtp_payload_type_eq_exact(dest, &handler->dest_pt))
+	}
+	if (!rtp_payload_type_eq_exact(dest, &handler->dest_pt)) {
+		ilogs(codec, LOG_DEBUG, ">> Reset case 2");
 		goto reset;
-	if (handler->handler_func != handler_func_transcode)
+	}
+	if (handler->handler_func != handler_func_transcode) {
+		ilogs(codec, LOG_DEBUG, ">> Reset case 3");
 		goto reset;
-	if (handler->packet_decoded != packet_decoded)
+	}
+	if (handler->packet_decoded != packet_decoded) {
+		ilogs(codec, LOG_DEBUG, ">> Reset case 4");
 		goto reset;
-	if (handler->cn_payload_type != cn_payload_type)
+	}
+	if (handler->cn_payload_type != cn_payload_type) {
+		ilogs(codec, LOG_DEBUG, ">> Reset case 5");
 		goto reset;
-	if (handler->dtmf_payload_type != dtmf_payload_type)
+	}
+	if (handler->dtmf_payload_type != dtmf_payload_type) {
+		ilogs(codec, LOG_DEBUG, ">> Reset case 6");
 		goto reset;
-	if ((pcm_dtmf_detect ? 1 : 0) != handler->pcm_dtmf_detect)
+	}
+	if ((pcm_dtmf_detect ? 1 : 0) != handler->pcm_dtmf_detect) {
+		ilogs(codec, LOG_DEBUG, ">> Reset case 7");
 		goto reset;
+	}
 
 	ilogs(codec, LOG_DEBUG, "Leaving transcode context for " STR_FORMAT "/" STR_FORMAT
 		" (%i) -> " STR_FORMAT "/" STR_FORMAT " (%i) intact",
@@ -524,6 +540,7 @@ reset:
 
 	g_atomic_int_inc(&stats_entry->num_transcoders);
 
+	ilogs(codec, LOG_DEBUG, "DO resetting sequencers");
 	ssrc_hash_foreach(handler->media->monologue->ssrc_hash, __reset_sequencer, NULL);
 
 no_handler_reset:
@@ -1825,6 +1842,7 @@ static void __ssrc_unlock_both(struct media_packet *mp) {
 
 static void __seq_free(void *p) {
 	packet_sequencer_t *seq = p;
+	ilogs(transcoding, LOG_DEBUG, "destroy sequencer: %p", seq);
 	packet_sequencer_destroy(seq);
 	g_slice_free1(sizeof(*seq), seq);
 }
@@ -1885,14 +1903,34 @@ static int __handler_func_sequencer(struct media_packet *mp, struct transcode_pa
 	__ssrc_lock_both(mp);
 
 	// get sequencer appropriate for our output
-	if (!ssrc_in_p->sequencers)
+	if (!ssrc_in_p->sequencers) {
 		ssrc_in_p->sequencers = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, __seq_free);
+		ilogs(transcoding, LOG_DEBUG, "creating new sequencers hash: %p", ssrc_in_p->sequencers);
+	}
 	packet_sequencer_t *seq = g_hash_table_lookup(ssrc_in_p->sequencers, mp->media_out);
 	if (!seq) {
 		seq = g_slice_alloc0(sizeof(*seq));
 		packet_sequencer_init(seq, (GDestroyNotify) __transcode_packet_free);
 		g_hash_table_insert(ssrc_in_p->sequencers, mp->media_out, seq);
+		ilogs(transcoding, LOG_DEBUG, "creating new sequencer %p", seq);
+		//!!!!!
+		if(0) {
+			unsigned int stats_ext_seq=atomic_get_na(&ssrc_in->stats->ext_seq);
+			if(stats_ext_seq) {
+				uint16_t last_seq=(stats_ext_seq & 0xffff);
+				int roc=stats_ext_seq>>16;
+				ilog(LOG_DEBUG, "codec: restoring seq roc: %d ext_seq: %u last_seq: %u", roc, stats_ext_seq, last_seq);
+				seq->roc=roc;
+				seq->ext_seq=stats_ext_seq-1;
+				seq->seq=last_seq;
+			}
+		}
+		//!!!!!
 	}
+
+	//!!!!!
+	ilog(LOG_DEBUG, "codec: seq->ext_seq seq->roc: %u %d", seq->ext_seq, seq->roc);
+	//!!!!!
 
 	uint16_t seq_ori = seq->seq;
 	int seq_ret = packet_sequencer_insert(seq, &packet->p);
@@ -1985,6 +2023,9 @@ static int __handler_func_sequencer(struct media_packet *mp, struct transcode_pa
 		}
 
 		ssrc_in_p->packets_lost = seq->lost_count;
+		//!!!!!
+		ilog(LOG_DEBUG, "codec: old ext_seq %u new %u", atomic_get_na(&ssrc_in->stats->ext_seq), seq->ext_seq);
+		//!!!!!
 		atomic_set_na(&ssrc_in->stats->ext_seq, seq->ext_seq);
 
 		ilogs(transcoding, LOG_DEBUG, "Processing RTP packet: seq %u, TS %lu",

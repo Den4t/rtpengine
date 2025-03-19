@@ -48,7 +48,8 @@ static unsigned int packet_index(struct ssrc_ctx *ssrc_ctx, struct rtp_header *r
 
 	seq = ntohs(rtp->seq_num);
 
-	crypto_debug_init((seq & 0x1ff) == (ssrc_ctx->parent->h.ssrc & 0x1ff));
+	//!!!crypto_debug_init((seq & 0x1ff) == (ssrc_ctx->parent->h.ssrc & 0x1ff));
+	crypto_debug_init(1);
 	crypto_debug_printf("SSRC %" PRIx32 ", seq %" PRIu16, ssrc_ctx->parent->h.ssrc, seq);
 
 	/* rfc 3711 section 3.3.1 */
